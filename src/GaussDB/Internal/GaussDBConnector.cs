@@ -308,16 +308,16 @@ public sealed partial class GaussDBConnector
     int _resetWithoutDeallocateResponseCount;
 
     // Backend
-    readonly CommandCompleteMessage      _commandCompleteMessage      = new();
-    readonly ReadyForQueryMessage        _readyForQueryMessage        = new();
+    readonly CommandCompleteMessage _commandCompleteMessage = new();
+    readonly ReadyForQueryMessage _readyForQueryMessage = new();
     readonly ParameterDescriptionMessage _parameterDescriptionMessage = new();
-    readonly DataRowMessage              _dataRowMessage              = new();
-    readonly RowDescriptionMessage       _rowDescriptionMessage       = new(connectorOwned: true);
+    readonly DataRowMessage _dataRowMessage = new();
+    readonly RowDescriptionMessage _rowDescriptionMessage = new(connectorOwned: true);
 
     // Since COPY is rarely used, allocate these lazily
-    CopyInResponseMessage?  _copyInResponseMessage;
+    CopyInResponseMessage? _copyInResponseMessage;
     CopyOutResponseMessage? _copyOutResponseMessage;
-    CopyDataMessage?        _copyDataMessage;
+    CopyDataMessage? _copyDataMessage;
     CopyBothResponseMessage? _copyBothResponseMessage;
 
     #endregion
@@ -806,7 +806,7 @@ public sealed partial class GaussDBConnector
             X509Certificate2? cert = null;
             if (Path.GetExtension(certPath).ToUpperInvariant() != ".PFX")
             {
-#if NET5_0_OR_GREATER
+#if NET6_0 || NET7_0 || NET8_0
                 // It's PEM time
                 var keyPath = Settings.SslKey ?? PostgresEnvironment.SslKey ?? PostgresEnvironment.SslKeyDefault;
                 cert = string.IsNullOrEmpty(password)
@@ -819,6 +819,18 @@ public sealed partial class GaussDBConnector
                     using var previousCert = cert;
                     cert = new X509Certificate2(cert.Export(X509ContentType.Pkcs12));
                 }
+#elif NET9_0_OR_GREATER
+                var keyPath = Settings.SslKey ?? PostgresEnvironment.SslKey ?? PostgresEnvironment.SslKeyDefault;
+                cert = string.IsNullOrEmpty(password)
+                    ? X509Certificate2.CreateFromPemFile(certPath, keyPath)
+                    : X509Certificate2.CreateFromEncryptedPemFile(certPath, password, keyPath);
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    // Windows crypto API has a bug with pem certs
+                    // See #3650
+                    using var previousCert = cert;
+                    cert = X509CertificateLoader.LoadCertificate(cert.Export(X509ContentType.Pkcs12));
+                }
 
 #else
                 // Technically PEM certificates are supported as of .NET 5 but we don't build for the net5.0
@@ -828,9 +840,13 @@ public sealed partial class GaussDBConnector
 #endif
             }
 
-            cert ??= new X509Certificate2(certPath, password);
-            clientCertificates.Add(cert);
+#if NET9_0_OR_GREATER
+            cert ??= X509CertificateLoader.LoadPkcs12FromFile(certPath, password);
 
+#else
+            cert ??= new X509Certificate2(certPath, password);
+#endif
+            clientCertificates.Add(cert);
             _certificate = cert;
         }
 
@@ -948,7 +964,7 @@ public sealed partial class GaussDBConnector
                 var write = new List<Socket> { socket };
                 var error = new List<Socket> { socket };
                 Socket.Select(null, write, error, perEndpointTimeout);
-                var errorCode = (int) socket.GetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Error)!;
+                var errorCode = (int)socket.GetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Error)!;
                 if (errorCode != 0)
                     throw new SocketException(errorCode);
                 if (write.Count is 0)
@@ -1449,7 +1465,8 @@ public sealed partial class GaussDBConnector
             return _commandCompleteMessage.Load(buf, len);
         case BackendMessageCode.ReadyForQuery:
             var rfq = _readyForQueryMessage.Load(buf);
-            if (!isPrependedMessage) {
+            if (!isPrependedMessage)
+            {
                 // Transaction status on prepended messages shouldn't be processed, because there may be prepended messages
                 // before the begin transaction message. In this case, they will contain transaction status Idle, which will
                 // clear our Pending transaction status. Only process transaction status on RFQ's from user-provided, non
@@ -1491,15 +1508,15 @@ public sealed partial class GaussDBConnector
             var authType = (AuthenticationRequestType)buf.ReadInt32();
             return authType switch
             {
-                AuthenticationRequestType.AuthenticationOk                => AuthenticationOkMessage.Instance,
+                AuthenticationRequestType.AuthenticationOk => AuthenticationOkMessage.Instance,
                 AuthenticationRequestType.AuthenticationCleartextPassword => AuthenticationCleartextPasswordMessage.Instance,
-                AuthenticationRequestType.AuthenticationMD5Password       => AuthenticationMD5PasswordMessage.Load(buf),
-                AuthenticationRequestType.AuthenticationGSS               => AuthenticationGSSMessage.Instance,
-                AuthenticationRequestType.AuthenticationSSPI              => AuthenticationSSPIMessage.Instance,
-                AuthenticationRequestType.AuthenticationGSSContinue       => AuthenticationGSSContinueMessage.Load(buf, len),
-                AuthenticationRequestType.AuthenticationSASL              => AuthenticationSASLMessage.Load(buf),
-                AuthenticationRequestType.AuthenticationSASLContinue      => new AuthenticationSASLContinueMessage(buf, len - 4),
-                AuthenticationRequestType.AuthenticationSASLFinal         => new AuthenticationSASLFinalMessage(buf, len - 4),
+                AuthenticationRequestType.AuthenticationMD5Password => AuthenticationMD5PasswordMessage.Load(buf),
+                AuthenticationRequestType.AuthenticationGSS => AuthenticationGSSMessage.Instance,
+                AuthenticationRequestType.AuthenticationSSPI => AuthenticationSSPIMessage.Instance,
+                AuthenticationRequestType.AuthenticationGSSContinue => AuthenticationGSSContinueMessage.Load(buf, len),
+                AuthenticationRequestType.AuthenticationSASL => AuthenticationSASLMessage.Load(buf),
+                AuthenticationRequestType.AuthenticationSASLContinue => new AuthenticationSASLContinueMessage(buf, len - 4),
+                AuthenticationRequestType.AuthenticationSASLFinal => new AuthenticationSASLFinalMessage(buf, len - 4),
                 _ => throw new NotSupportedException($"Authentication method not supported (Received: {authType})")
             };
 
@@ -1523,7 +1540,7 @@ public sealed partial class GaussDBConnector
 
         case BackendMessageCode.PortalSuspended:
         case BackendMessageCode.FunctionCallResponse:
-            // We don't use the obsolete function call protocol
+        // We don't use the obsolete function call protocol
         default:
             ThrowHelper.ThrowInvalidOperationException($"Internal GaussDB bug: unexpected value {code} of enum {nameof(BackendMessageCode)}. Please file a bug.");
             return null;
@@ -1683,7 +1700,14 @@ public sealed partial class GaussDBConnector
 #endif
 
                 if (certs.Count == 0)
+                {
+#if NET9_0_OR_GREATER
+                    certs.Add(X509CertificateLoader.LoadCertificateFromFile(certRootPath));
+#else
                     certs.Add(new X509Certificate2(certRootPath));
+#endif
+
+                }
             }
 
 #if NET5_0_OR_GREATER
@@ -2702,7 +2726,7 @@ public sealed partial class GaussDBConnector
         rawValue = incomingValue.ToArray();
         _rawParameters.Add((rawName, rawValue));
 
-        ProcessParameter:
+    ProcessParameter:
         var name = TextEncoding.GetString(rawName);
         var value = TextEncoding.GetString(rawValue);
 

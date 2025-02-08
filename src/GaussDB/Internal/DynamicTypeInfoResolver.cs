@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using GaussDB.Internal.Postgres;
 using GaussDB.PostgresTypes;
 
@@ -26,7 +28,7 @@ public abstract class DynamicTypeInfoResolver : IPgTypeInfoResolver
         return predicate(matchedType);
     }
 
-    protected static bool IsArrayLikeType(Type type, [NotNullWhen(true)]out Type? elementType) => TypeInfoMappingCollection.IsArrayLikeType(type, out elementType);
+    protected static bool IsArrayLikeType(Type type, [NotNullWhen(true)] out Type? elementType) => TypeInfoMappingCollection.IsArrayLikeType(type, out elementType);
 
     protected static bool IsArrayDataTypeName(DataTypeName dataTypeName, PgSerializerOptions options, out DataTypeName elementDataTypeName)
     {
@@ -79,6 +81,122 @@ public abstract class DynamicTypeInfoResolver : IPgTypeInfoResolver
                 _mappings = new(baseCollection);
         }
 
+#if NET9_0_OR_GREATER
+        public DynamicMappingCollection AddMapping(Type type, string dataTypeName, TypeInfoFactory factory, Func<TypeInfoMapping, TypeInfoMapping>? configureMapping = null)
+        {
+            if (type.IsValueType && Nullable.GetUnderlyingType(type) is not null)
+                throw new NotSupportedException("Mapping nullable types is not supported, map its underlying type instead to get both.");
+
+            // Call appropriate method based on whether it's a value type or reference type
+            if (type.IsValueType)
+            {
+                AddStructTypeMapping(type, dataTypeName, factory, configureMapping);
+            }
+            else
+            {
+                AddReferenceTypeMapping(type, dataTypeName, factory, configureMapping);
+            }
+
+            return this;
+        }
+
+        private void AddStructTypeMapping(Type type, string dataTypeName, TypeInfoFactory factory, Func<TypeInfoMapping, TypeInfoMapping>? configureMapping)
+        {
+            // Call the method directly for structs (value types)
+            AddStructTypeMethodInfo.Invoke(_mappings ??= new(), new object?[] { dataTypeName, factory, configureMapping });
+        }
+
+        private void AddReferenceTypeMapping(Type type, string dataTypeName, TypeInfoFactory factory, Func<TypeInfoMapping, TypeInfoMapping>? configureMapping)
+        {
+            // Call the method directly for reference types
+            AddTypeMethodInfo.Invoke(_mappings ??= new(), new object?[] { dataTypeName, factory, configureMapping });
+        }
+
+        public DynamicMappingCollection AddArrayMapping(Type elementType, string dataTypeName)
+        {
+            // Call the appropriate method for arrays based on whether it's a value type or reference type
+            if (elementType.IsValueType)
+            {
+                AddStructArrayMapping(elementType, dataTypeName);
+            }
+            else
+            {
+                AddReferenceArrayMapping(elementType, dataTypeName);
+            }
+
+            return this;
+        }
+
+        private void AddStructArrayMapping(Type elementType, string dataTypeName)
+        {
+            // Call the method directly for value type arrays (structs)
+            AddStructArrayTypeMethodInfo.Invoke(_mappings ??= new(), new object?[] { dataTypeName });
+        }
+
+        private void AddReferenceArrayMapping(Type elementType, string dataTypeName)
+        {
+            // Call the method directly for reference type arrays
+            AddArrayTypeMethodInfo.Invoke(_mappings ??= new(), new object?[] { dataTypeName });
+        }
+
+        public DynamicMappingCollection AddResolverMapping(Type type, string dataTypeName, TypeInfoFactory factory, Func<TypeInfoMapping, TypeInfoMapping>? configureMapping = null)
+        {
+            if (type.IsValueType && Nullable.GetUnderlyingType(type) is not null)
+                throw new NotSupportedException("Mapping nullable types is not supported");
+
+            // Call the appropriate resolver method based on whether it's a value type or reference type
+            if (type.IsValueType)
+            {
+                AddResolverStructTypeMapping(type, dataTypeName, factory, configureMapping);
+            }
+            else
+            {
+                AddResolverReferenceTypeMapping(type, dataTypeName, factory, configureMapping);
+            }
+
+            return this;
+        }
+
+        private void AddResolverStructTypeMapping(Type type, string dataTypeName, TypeInfoFactory factory, Func<TypeInfoMapping, TypeInfoMapping>? configureMapping)
+        {
+            // Call the resolver method directly for structs (value types)
+            AddResolverStructTypeMethodInfo.Invoke(_mappings ??= new(), new object?[] { dataTypeName, factory, configureMapping });
+        }
+
+        private void AddResolverReferenceTypeMapping(Type type, string dataTypeName, TypeInfoFactory factory, Func<TypeInfoMapping, TypeInfoMapping>? configureMapping)
+        {
+            // Call the resolver method directly for reference types
+            AddResolverTypeMethodInfo.Invoke(_mappings ??= new(), new object?[] { dataTypeName, factory, configureMapping });
+        }
+
+        public DynamicMappingCollection AddResolverArrayMapping(Type elementType, string dataTypeName)
+        {
+            // Call the appropriate resolver method for arrays based on whether it's a value type or reference type
+            if (elementType.IsValueType)
+            {
+                AddResolverStructArrayMapping(elementType, dataTypeName);
+            }
+            else
+            {
+                AddResolverReferenceArrayMapping(elementType, dataTypeName);
+            }
+
+            return this;
+        }
+
+        private void AddResolverStructArrayMapping(Type elementType, string dataTypeName)
+        {
+            // Call the resolver method directly for value type arrays (structs)
+            AddResolverStructArrayTypeMethodInfo.Invoke(_mappings ??= new(), new object?[] { dataTypeName });
+        }
+
+        private void AddResolverReferenceArrayMapping(Type elementType, string dataTypeName)
+        {
+            // Call the resolver method directly for reference type arrays
+            AddResolverArrayTypeMethodInfo.Invoke(_mappings ??= new(), new object?[] { dataTypeName });
+        }
+
+#else
         public DynamicMappingCollection AddMapping(Type type, string dataTypeName, TypeInfoFactory factory, Func<TypeInfoMapping, TypeInfoMapping>? configureMapping = null)
         {
             if (type.IsValueType && Nullable.GetUnderlyingType(type) is not null)
@@ -122,6 +240,8 @@ public abstract class DynamicTypeInfoResolver : IPgTypeInfoResolver
                 .MakeGenericMethod(elementType).Invoke(_mappings ??= new(), new object?[] { dataTypeName });
             return this;
         }
+
+#endif
 
         internal PgTypeInfo? Find(Type? type, DataTypeName dataTypeName, PgSerializerOptions options)
             => _mappings?.Find(type, dataTypeName, options);
